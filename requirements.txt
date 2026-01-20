@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+httpx
+openai
+google-generativeai
+python-dotenv
+sqlalchemy
+pymysql
+yfinance
