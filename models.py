@@ -9,3 +9,19 @@ class Favorite(Base):
     stock_code = Column(String(20), index=True, nullable=False)
     stock_name = Column(String(100), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class FavoriteKR(Base):
+    __tablename__ = "favorites_kr"
+
+    id = Column(Integer, primary_key=True, index=True)
+    stock_code = Column(String(20), index=True, nullable=False)
+    stock_name = Column(String(100), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class FavoriteUS(Base):
+    __tablename__ = "favorites_us"
+
+    id = Column(Integer, primary_key=True, index=True)
+    stock_code = Column(String(20), index=True, nullable=False)
+    stock_name = Column(String(100), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -7,8 +7,14 @@ import os
 import requests
 from urllib.parse import unquote
 
+import logging
+
+# Configure Logging (Writes to stderr by default, safe for MCP)
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
+
 # DEBUG PRINT TO CONFIRM LOAD
-print("!!! LOADING STOCK_DATA_PROVIDER.PY - HYBRID (PUBLIC DATA + FDR) !!!")
+logger.info("!!! LOADING STOCK_DATA_PROVIDER.PY - HYBRID (PUBLIC DATA + FDR) !!!")
 
 KRX_CACHE = {
     "name_map": {}, # Name -> Code
@@ -20,7 +26,7 @@ def load_krx_data():
     if KRX_CACHE["loaded"]:
         return
 
-    print("[DEBUG] Loading KRX Master List...")
+    logger.info("[DEBUG] Loading KRX Master List...")
     try:
         url = "http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
         # Explicit encoding for Korean Windows site
@@ -37,12 +43,12 @@ def load_krx_data():
             KRX_CACHE["code_map"][row['code']] = row['name']
             
         KRX_CACHE["loaded"] = True
-        print(f"[DEBUG] Loaded {len(df)} Korean stocks.")
+        logger.info(f"[DEBUG] Loaded {len(df)} Korean stocks.")
     except Exception as e:
-        print(f"[ERROR] Failed to load KRX data: {e}")
+        logger.info(f"[ERROR] Failed to load KRX data: {e}")
 
 async def search_stock(query: str):
-    print(f"[DEBUG] Searching stock for: {query}")
+    logger.info(f"[DEBUG] Searching stock for: {query}")
     
     # Ensure data is loaded (blocking call ok for first time/cache)
     if not KRX_CACHE["loaded"]:
@@ -106,7 +112,7 @@ async def search_stock(query: str):
                         "score": 8 if symbol.lower() == query.lower() else 3
                     })
     except Exception as e:
-        print(f"[ERROR] Yahoo Search failed: {e}")
+        logger.info(f"[ERROR] Yahoo Search failed: {e}")
             
     # Sort by relevance
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -123,7 +129,7 @@ def fetch_public_data(code: str, start_date: str, end_date: str):
     """
     api_key = os.getenv("DATA_GO_KR_API_KEY")
     if not api_key:
-        print("[DEBUG] No Public Data API Key found.")
+        logger.info("[DEBUG] No Public Data API Key found.")
         return None
 
     # Handle URL encoding of key if needed
@@ -148,18 +154,18 @@ def fetch_public_data(code: str, start_date: str, end_date: str):
     if s_date: params["beginBasDt"] = s_date
     if e_date: params["endBasDt"] = e_date
 
-    print(f"[DEBUG] Public API fetching for {code}...")
+    logger.info(f"[DEBUG] Public API fetching for {code}...")
     try:
         res = requests.get(url, params=params, timeout=5)
         if res.status_code != 200:
-            print(f"[ERROR] Public API Status: {res.status_code}")
+            logger.info(f"[ERROR] Public API Status: {res.status_code}")
             return None
             
         data = res.json()
         items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
         
         if not items:
-            print("[DEBUG] Public API returned no items.")
+            logger.info("[DEBUG] Public API returned no items.")
             return None
             
         # Parse items
@@ -178,15 +184,15 @@ def fetch_public_data(code: str, start_date: str, end_date: str):
         
         # Sort by date ascending
         parsed_data.sort(key=lambda x: x["date"])
-        print(f"[DEBUG] Public API success. {len(parsed_data)} points.")
+        logger.info(f"[DEBUG] Public API success. {len(parsed_data)} points.")
         return parsed_data
         
     except Exception as e:
-        print(f"[ERROR] Public API fetch exception: {e}")
+        logger.info(f"[ERROR] Public API fetch exception: {e}")
         return None
 
 async def get_stock_price(code: str, timeframe: str = "day", start_date: str = None, end_date: str = None):
-    print(f"[DEBUG] get_stock_price called via HYBRID PROVIDER. Code: {code}")
+    logger.info(f"[DEBUG] get_stock_price called via HYBRID PROVIDER. Code: {code}")
     
     if not KRX_CACHE["loaded"]:
         load_krx_data()
@@ -209,10 +215,10 @@ async def get_stock_price(code: str, timeframe: str = "day", start_date: str = N
         data = await loop.run_in_executor(None, lambda: fetch_public_data(code, start_date, end_date))
         
         if data:
-            print(f"[DEBUG] Data provided by Public Data Portal.")
+            logger.info(f"[DEBUG] Data provided by Public Data Portal.")
             return {"name": stock_name, "data": data}
         else:
-            print(f"[WARN] Public Data Portal failed/empty. Falling back to FinanceDataReader.")
+            logger.info(f"[WARN] Public Data Portal failed/empty. Falling back to FinanceDataReader.")
             data = [] # Reset for fallback
 
     # --- STRATEGY 2: FinanceDataReader (Fallback for KRX, Primary for US) ---
@@ -278,7 +284,7 @@ async def get_stock_price(code: str, timeframe: str = "day", start_date: str = N
                     # print(f"[DEBUG] Row parsing error: {e}")
                     continue
                     
-            print(f"[DEBUG] FDR Success. {len(data)} points.")
+            logger.info(f"[DEBUG] FDR Success. {len(data)} points.")
             
             return {
                 "name": stock_name, 
@@ -286,7 +292,7 @@ async def get_stock_price(code: str, timeframe: str = "day", start_date: str = N
             }
             
     except Exception as e:
-        print(f"[ERROR] FDR failed: {e}")
+        logger.info(f"[ERROR] FDR failed: {e}")
 
     return {
         "name": stock_name + " (No Data)",
@@ -302,3 +308,91 @@ async def get_financials(code: str):
         "per": 12.5,
         "pbr": 1.2
     }
+
+async def get_global_market_indices():
+    """
+    Fetch global market indices for the dashboard.
+    """
+    indices = {
+        "US_10Y": "^TNX",
+        "DXY": "DX-Y.NYB",
+        "USD_KRW": "KRW=X",
+        "VIX": "^VIX",
+        "BTC": "BTC-USD",
+        "ES_F": "ES=F",
+        "NQ_F": "NQ=F",
+        "WTI": "CL=F",
+        "NVDA": "NVDA",
+        "TSLA": "TSLA",
+        "FearGreed": "MOCK_FG",  # Special handle
+        "KoreanCDS": "MOCK_CDS"  # Special handle
+    }
+
+    results = {}
+    
+    # We will fetch only the last 2 days to calculate change
+    loop = asyncio.get_event_loop()
+    
+    def fetch_index(key, symbol):
+        # MOCK DATA FOR MISSING APIs
+        if key == "FearGreed":
+            # Real API harder to find, returning static/random for MVP
+            return key, {
+                "value": 45, 
+                "prev": 48, 
+                "change": -3, 
+                "pct_change": -6.25
+            }
+        if key == "KoreanCDS":
+            return key, {
+                "value": 32.5, 
+                "prev": 32.0, 
+                "change": 0.5, 
+                "pct_change": 1.56
+            }
+
+        try:
+            # Fetch last 5 distinct trading days to be safe
+            df = fdr.DataReader(symbol, (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d"))
+            if df.empty:
+                return key, None
+                
+            last_row = df.iloc[-1]
+            prev_row = df.iloc[-2] if len(df) > 1 else last_row
+            
+            val = last_row['Close']
+            prev = prev_row['Close']
+
+            # Check for NaN immediately
+            if pd.isna(val) or pd.isna(prev):
+                return key, None
+            
+            # Formatting
+            if key == "US_10Y": val = val # Yahoo returns yield directly (e.g. 4.25)
+            
+            change = val - prev
+            pct_change = (change / prev) * 100 if prev != 0 else 0
+            
+            # Final check for calculated NaNs (e.g. if prev was 0 or something weird)
+            if pd.isna(change) or pd.isna(pct_change):
+                return key, None
+            
+            return key, {
+                "value": float(val), # Ensure native float
+                "prev": float(prev),
+                "change": float(change),
+                "pct_change": float(pct_change)
+            }
+        except Exception as e:
+            logger.info(f"[ERROR] Failed to fetch {key} ({symbol}): {e}")
+            return key, None
+
+    # Run in parallel
+    tasks = [loop.run_in_executor(None, lambda k=k, s=s: fetch_index(k, s)) for k, s in indices.items()]
+    fetched = await asyncio.gather(*tasks)
+    
+    for key, data in fetched:
+        if data:
+            results[key] = data
+            
+    return results
