@@ -12,10 +12,14 @@ import crud, models, schemas, database
 import stock_data_provider as data_service
 import ai_service
 import report_service
+import thinkpool_service
 
 load_dotenv()
 
-models.Base.metadata.create_all(bind=database.engine)
+try:
+    models.Base.metadata.create_all(bind=database.engine)
+except Exception as e:
+    print(f"Warning: Database connection failed during startup. DB features will be unavailable. Error: {e}")
 
 app = FastAPI(title="Stock Search AI (NEW SERVER)", description="Stock Search with AI Analysis")
 
@@ -148,6 +152,10 @@ async def get_dashboard_data():
 @app.get("/api/reports")
 async def get_reports(source: str = "hankyung", start_date: str = None, end_date: str = None):
     return await report_service.get_research_reports(source, start_date, end_date)
+
+@app.get("/api/issue/ai")
+async def get_ai_issues():
+    return await thinkpool_service.get_ai_issue_data()
 
 
 if __name__ == "__main__":
