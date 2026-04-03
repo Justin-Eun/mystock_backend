@@ -1,7 +1,25 @@
+import logging
+import asyncio
+import threading
 import FinanceDataReader as fdr
 import pandas as pd
 from datetime import datetime, timedelta
-import asyncio
+import yfinance as yf
+import re
+
+# Optional Selenium imports (handled gracefully if missing)
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from webdriver_manager.chrome import ChromeDriverManager
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+
 import httpx
 import os
 import requests
@@ -322,8 +340,8 @@ async def get_global_market_indices():
         "ES_F": "ES=F",
         "NQ_F": "NQ=F",
         "WTI": "CL=F",
-        "NVDA": "NVDA",
-        "TSLA": "TSLA",
+        "KR_FUTURES": "INVESTING_KR",  # Korean night futures from Investing.com
+        "DXI": "MACROMICRO_DXI",  # DRAM Stock Index from MacroMicro
         "FearGreed": "MOCK_FG",  # Special handle
         "KoreanCDS": "MOCK_CDS"  # Special handle
     }
@@ -331,7 +349,41 @@ async def get_global_market_indices():
     results = {}
     
     # We will fetch only the last 2 days to calculate change
-    loop = asyncio.get_event_loop()
+    # loop = asyncio.get_event_loop()  <-- REMOVED: Do not use global loop
+
+    # Lock for driver creation to avoid race conditions with webdriver_manager
+    _driver_lock = threading.Lock()
+
+    def _get_selenium_driver():
+        """Helper to create a headless chrome driver safely"""
+        if not SELENIUM_AVAILABLE:
+            return None
+        
+        try:
+            chrome_options = Options()
+            chrome_options.add_argument("--headless=new")
+            # ... options ...
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--window-size=1200,800")
+            chrome_options.add_argument("--log-level=3")
+            chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+            
+            # Simple install - webdriver_manager handles caching
+            # Lock only the installation/cache check part
+            with _driver_lock:
+                service = Service(ChromeDriverManager().install())
+                
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver.set_page_load_timeout(15)
+            return driver
+        except Exception as e:
+            logger.error(f"Failed to create Selenium driver: {e}")
+            return None
+
     
     def fetch_index(key, symbol):
         # MOCK DATA FOR MISSING APIs
@@ -350,8 +402,137 @@ async def get_global_market_indices():
                 "change": 0.5, 
                 "pct_change": 1.56
             }
+        if key == "DXI":
+            # DRAM Stock Index from MacroMicro (Selenium required)
+            driver = None
+            try:
+                driver = _get_selenium_driver()
+                if not driver:
+                    raise Exception("Selenium driver unavailable")
+
+                import time as _time
+                
+                driver.get("https://en.macromicro.me/series/2793/semiconductor-dram-stock-index")
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".mm-cc-chart-stats-title, [class*=stat], span.val"))
+                )
+                _time.sleep(1.0)
+                
+                # Extract DXI value using precise CSS classes
+                dxi_data = driver.execute_script("""
+                    var result = {};
+                    
+                    var statVal = document.querySelector('.stat-val .val, .stat-val, span.val');
+                    if (statVal) result.current = parseFloat(statVal.textContent.trim().replace(/,/g, ''));
+                    
+                    var prevVal = document.querySelector('.prev-val .val, .prev-val');
+                    if (prevVal) result.prev = parseFloat(prevVal.textContent.trim().replace(/,/g, ''));
+                    
+                    var deltaVal = document.querySelector('.delta-val .val, .delta-val');
+                    if (deltaVal) result.delta = parseFloat(deltaVal.textContent.trim().replace(/,/g, ''));
+                    
+                    return result;
+                """)
+                
+                if dxi_data and dxi_data.get('current'):
+                    val = dxi_data['current']
+                    prev = dxi_data.get('prev', val)
+                    change = dxi_data.get('delta', val - prev)
+                    pct_change = (change / prev) * 100 if prev != 0 else 0
+                    
+                    return key, {
+                        "value": round(float(val), 2),
+                        "prev": round(float(prev), 2),
+                        "change": round(float(change), 2),
+                        "pct_change": round(float(pct_change), 2)
+                    }
+            except Exception as dxi_err:
+                logger.info(f"[ERROR] Failed to fetch DXI: {dxi_err}")
+                return key, None
+            finally:
+                if driver:
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+
+        if key == "KR_FUTURES":
+            # Scrape from kr.investing.com
+            driver = None
+            try:
+                driver = _get_selenium_driver()
+                if not driver:
+                    raise Exception("Selenium driver unavailable")
+
+                import time as _time
+                
+                url = "https://kr.investing.com/indices/korea-200-futures"
+                driver.get(url)
+                
+                # Wait for the price element to load
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, '[data-test="instrument-price-last"]'))
+                )
+                _time.sleep(1)
+                
+                # Extract data via JavaScript using data-test attributes
+                data = driver.execute_script("""
+                    var result = {};
+                    var priceEl = document.querySelector('[data-test="instrument-price-last"]');
+                    var changeEl = document.querySelector('[data-test="instrument-price-change"]');
+                    var pctEl = document.querySelector('[data-test="instrument-price-change-percent"]');
+                    if (priceEl) result.price = priceEl.textContent.trim();
+                    if (changeEl) result.change = changeEl.textContent.trim();
+                    if (pctEl) result.pct = pctEl.textContent.trim();
+                    return result;
+                """)
+                
+                if data and data.get('price'):
+                    val = float(data['price'].replace(',', ''))
+                    change_str = data.get('change', '0').replace('+', '').replace(',', '')
+                    change = float(change_str)
+                    pct_str = data.get('pct', '0%').replace('(', '').replace(')', '').replace('%', '').replace('+', '')
+                    pct_change = float(pct_str)
+                    prev = val - change
+                    
+                    return key, {
+                        "value": round(val, 2),
+                        "prev": round(prev, 2),
+                        "change": round(change, 2),
+                        "pct_change": round(pct_change, 2)
+                    }
+            except Exception as kr_err:
+                logger.info(f"[ERROR] Failed to fetch Korean night futures: {kr_err}")
+                return key, None
+            finally:
+                if driver: 
+                    try:
+                        driver.quit()
+                    except:
+                        pass
 
         try:
+            # Special handling for BTC - try direct Yahoo Finance API first
+            if key == "BTC":
+                try:
+                    import yfinance as yf
+                    btc = yf.Ticker("BTC-USD")
+                    hist = btc.history(period="5d")
+                    if not hist.empty and len(hist) >= 2:
+                        val = hist['Close'].iloc[-1]
+                        prev = hist['Close'].iloc[-2]
+                        if not pd.isna(val) and not pd.isna(prev):
+                            change = val - prev
+                            pct_change = (change / prev) * 100 if prev != 0 else 0
+                            return key, {
+                                "value": float(val),
+                                "prev": float(prev),
+                                "change": float(change),
+                                "pct_change": float(pct_change)
+                            }
+                except Exception as yf_err:
+                    logger.info(f"[WARN] yfinance failed for BTC, trying FDR: {yf_err}")
+            
             # Fetch last 5 distinct trading days to be safe
             df = fdr.DataReader(symbol, (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d"))
             if df.empty:
@@ -368,7 +549,9 @@ async def get_global_market_indices():
                 return key, None
             
             # Formatting
-            if key == "US_10Y": val = val # Yahoo returns yield directly (e.g. 4.25)
+            if key == "US_10Y":
+                val = round(float(val), 2)  # Format to 2 decimal places
+                prev = round(float(prev), 2)
             
             change = val - prev
             pct_change = (change / prev) * 100 if prev != 0 else 0
@@ -387,12 +570,50 @@ async def get_global_market_indices():
             logger.info(f"[ERROR] Failed to fetch {key} ({symbol}): {e}")
             return key, None
 
-    # Run in parallel
-    tasks = [loop.run_in_executor(None, lambda k=k, s=s: fetch_index(k, s)) for k, s in indices.items()]
-    fetched = await asyncio.gather(*tasks)
+    # Use running loop to ensure compatibility with Uvicorn
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+        
+    async def fetch_with_timeout(key, symbol):
+        # Set individual timeouts
+        # DXI and KR_FUTURES involve Selenium, so give them more time but cap them
+        # Set individual timeouts
+        # DXI and KR_FUTURES involve Selenium, so give them more time
+        # Increased to 40s based on user logs showing 15s is insufficient
+        timeout = 40 if key in ["DXI", "KR_FUTURES"] else 15
+        try:
+            # wait_for works on the Future returned by run_in_executor
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: fetch_index(key, symbol)), 
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"[WARN] Timeout fetching {key} after {timeout}s")
+            return key, None
+        except Exception as e:
+            logger.error(f"[ERROR] Exception fetching {key}: {e}")
+            return key, None
+
+    # Create tasks with individual timeouts
+    tasks = [fetch_with_timeout(k, s) for k, s in indices.items()]
     
-    for key, data in fetched:
-        if data:
-            results[key] = data
+    # Run all tasks concurrently
+    # Since each task handles its own timeout, we don't strictly need a timeout here
+    fetched = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for item in fetched:
+        if isinstance(item, Exception):
+            logger.error(f"[ERROR] Unhandled task exception: {item}")
+            continue
+        if not item: continue
+        
+        # item is expected to be (key, data) or None
+        if isinstance(item, tuple) and len(item) == 2:
+            k, v = item
+            if v is not None:
+                results[k] = v
             
     return results
+

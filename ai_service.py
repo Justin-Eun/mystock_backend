@@ -45,6 +45,22 @@ import json
 
 # ... helper functions module level ...
 
+# Centralized URL Map
+REFERENCE_URLS = {
+    "US_10Y": "https://finance.yahoo.com/quote/%5ETNX",
+    "DXY": "https://www.tradingview.com/symbols/TVC-DXY/",
+    "USD_KRW": "https://finance.naver.com/marketindex/exchangeDetail.naver?marketindexCd=FX_USDKRW",
+    "VIX": "https://finance.yahoo.com/quote/%5EVIX",
+    "BTC": "https://finance.yahoo.com/quote/BTC-USD",
+    "ES_F": "https://finance.yahoo.com/quote/ES%3DF",
+    "NQ_F": "https://finance.yahoo.com/quote/NQ%3DF",
+    "WTI": "https://finance.yahoo.com/quote/CL%3DF",
+    "KR_FUTURES": "https://kr.investing.com/indices/korea-200-futures",
+    "DXI": "https://en.macromicro.me/series/2793/semiconductor-dram-stock-index",
+    "FearGreed": "https://edition.cnn.com/markets/fear-and-greed",
+    "KoreanCDS": "https://www.index.go.kr/unity/potal/main/EachDtlPageDetail.do?idx_cd=1068"
+}
+
 def create_fallback(data):
     items = []
     titles = {
@@ -56,11 +72,13 @@ def create_fallback(data):
         "ES_F": "S&P500",
         "NQ_F": "나스닥100",
         "WTI": "국제 유가 (WTI)",
-        "NVDA": "엔비디아",
-        "TSLA": "테슬라",
+        "KR_FUTURES": "한국 야간 선물 (KOSPI200)",
         "FearGreed": "공포 & 탐욕 지수",
         "KoreanCDS": "한국 CDS 프리미엄"
     }
+    
+    # Reference URLs using global constant
+    urls = REFERENCE_URLS
     
     for key, val in data.items():
         if not val: continue
@@ -73,11 +91,12 @@ def create_fallback(data):
             "id": key,
             "title": titles.get(key, key),
             "status": status,
-            "interpretation": "데이터 기반 자동 생성 (AI 미사용)"
+            "interpretation": "데이터 기반 자동 생성 (AI 미사용)",
+            "url": urls.get(key, "")  # Add reference URL
         })
     
     # Sort to match standard order if possible
-    order = ["US_10Y", "DXY", "USD_KRW", "VIX", "FearGreed", "BTC", "ES_F", "NQ_F", "WTI", "NVDA", "TSLA", "KoreanCDS"]
+    order = ["US_10Y", "DXY", "USD_KRW", "VIX", "FearGreed", "BTC", "ES_F", "NQ_F", "WTI", "KR_FUTURES", "KoreanCDS"]
     items.sort(key=lambda x: order.index(x['id']) if x['id'] in order else 99)
     
     return {
@@ -137,8 +156,9 @@ async def generate_market_briefing(market_data):
     Structure your response as a valid JSON object with the following keys:
     1. "summary_title": A short catchy title (e.g. "Rates & Dollar High, Volatility Returns")
     2. "summary_content": A 3-4 line summary of the overall market situation.
-    3. "items": A list of objects for each of the following 10 items (if data exists):
-       - US_10Y, DXY, USD_KRW, VIX, FearGreed, BTC, Futures, WTI, Leaders, KoreanCDS
+    3. "items": A list of objects for each of the following items (if data exists):
+       - US_10Y, DXY, USD_KRW, VIX, FearGreed, BTC, Futures, WTI, Leaders, KR_FUTURES, KoreanCDS, DXI
+       - DXI is the DRAM Stock Index (반도체 DRAM 재고지수) from MacroMicro, reflecting memory semiconductor market trends.
        - Each item should have:
          - "id": key from the input
          - "title": Display title (e.g. "미국 10년물 국채 금리")
@@ -151,10 +171,22 @@ async def generate_market_briefing(market_data):
 
     # execution flow
     result = await generate_with_openai(prompt)
-    if result: return result
+    if result: 
+        # Inject URLs into AI result
+        if "items" in result:
+            for item in result["items"]:
+                if item.get("id") in REFERENCE_URLS:
+                    item["url"] = REFERENCE_URLS[item["id"]]
+        return result
     
     result = await generate_with_gemini(prompt)
-    if result: return result
+    if result:
+        # Inject URLs into AI result
+        if "items" in result:
+            for item in result["items"]:
+                if item.get("id") in REFERENCE_URLS:
+                    item["url"] = REFERENCE_URLS[item["id"]]
+        return result
 
     logger.warning("[WARN] All AI services failed. Using fallback.")
     return create_fallback(market_data)
